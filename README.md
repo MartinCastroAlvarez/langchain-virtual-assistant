@@ -27,10 +27,16 @@ export OPENAI_API_KEY="lorem-ipsum"
 1. Place your PDF files in the [./pdfs](./pdfs) directory. Alternatively, you can generate test PDFs using the following command:
 
 ```bash
-poetry run python3 gen.py --number 10
+poetry run python3 generator.py --number 10
 ```
 
-2. Simply run the smart agent:
+2. You can then generate a vector store in [vectorstore.json](vectorstore.json) . using the following command:
+
+```bash
+pooetry run python3 indexer.py
+```
+
+3. Finally, run the smart agent and start asking questions:
 
 ```bash
 poetry run python3 agent.py
