@@ -51,7 +51,7 @@ Type one of adiós, bye, chau, exit, goodbye, quit, salir to end.
 
 ```bash
 >>> tengo dolor de cabeza
-Agent: El paciente con dolor de cabeza persistente fue diagnosticado con cefalea tensional por el Dr. Sergio Romero el 02/05/2024. La recomendación fue comenzar el tratamiento con la medicación recetada durante 7 días.
+: Agent: Catalina Ríos fue la paciente con la queja de dolor de cabeza. Esta información se encuentra en el Informe de Consulta Médica de Catalina Ríos, con fecha 02/05/2024.
 ```
 
 ```bash

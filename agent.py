@@ -8,27 +8,34 @@ from dataclasses import dataclass
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-from colorama import Fore, Style
+from colorama import Fore
+from colorama import Style
 from langchain.agents import AgentExecutor
 from langchain.agents import Tool
 from langchain.agents import initialize_agent
 from langchain.chains import LLMChain
-from langchain.chat_models import ChatOpenAI
-from langchain.document_loaders import PyPDFLoader
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
 from langchain.memory import ConversationSummaryBufferMemory
 from langchain.prompts import PromptTemplate
+from langchain.retrievers import BM25Retriever
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document as LC_Document
+from langchain_core.retrievers import BaseRetriever
+from langchain_core.runnables import Runnable
+from langchain_openai import ChatOpenAI
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY")
 assert OPENAI_API_KEY, "OPENAI_API_KEY not found in environment variables."
 
-PDF_DIR: str = "pdfs"
-VECTORSTORE_FILE: str = "vectorstore.json"
-CONVERSATION_CACHE: str = "conversation_cache.pkl"
+PDF_DIR: str = "./pdfs"
+VECTORSTORE_FILE: str = "./vectorstore.json"
+CONVERSATION_CACHE: str = "/tmp/conversation_cache.pkl"
 EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
-CACHE_DIR: str = "./.cache/sentence_transformers"
+CACHE_DIR: str = "/tmp/sentence_transformers"
 
 
 class Out:
@@ -82,11 +89,12 @@ class Vector:
 class Document:
     filename: str
     embeddings: list[np.ndarray]
+    text: str
 
     @classmethod
     def from_dict(cls, data: dict) -> Document:
         embeddings = [np.array(emb).flatten() for emb in data["embeddings"]]
-        return cls(filename=data["filename"], embeddings=embeddings)
+        return cls(filename=data["filename"], embeddings=embeddings, text=data.get("text", ""))
 
 
 class Store:
@@ -97,7 +105,18 @@ class Store:
         assert os.path.exists(filepath), f"Vectorstore file not found at {filepath}. PDF RAG will not work."
         with open(filepath, "r") as f:
             raw_data = json.load(f)
-        cls.db = [Document.from_dict(item) for item in raw_data]
+
+        cls.db = []
+        for item in raw_data:
+            doc = Document.from_dict(item)
+            if not doc.text:
+                filepath = os.path.join(PDF_DIR, doc.filename)
+                if os.path.exists(filepath):
+                    loader = PyPDFLoader(filepath)
+                    pages = loader.load()
+                    doc.text = "\n".join(page.page_content for page in pages)
+            cls.db.append(doc)
+
         total_embeddings = sum(len(doc.embeddings) for doc in cls.db)
         Out.green(f"Store loaded with {len(cls.db)} documents and {total_embeddings} total embeddings")
 
@@ -105,25 +124,25 @@ class Store:
     def search(cls, query_embedding: np.ndarray, n: int = 3) -> list[tuple[Document, float]]:
         assert cls.db, "Store.db has not been initialized."
         query_embedding = query_embedding.flatten()
-        
+
         all_similarities: list[tuple[Document, float]] = []
         for doc in cls.db:
             for emb in doc.embeddings:
                 similarity = Vector.distance(query_embedding, emb)
                 all_similarities.append((doc, similarity))
-        
+
         all_similarities.sort(key=lambda x: x[1], reverse=True)
-        
+
         top_n_unique: list[tuple[Document, float]] = []
         seen_filenames = set()
-        
+
         for doc, score in all_similarities:
             if doc.filename not in seen_filenames:
                 seen_filenames.add(doc.filename)
                 top_n_unique.append((doc, score))
                 if len(top_n_unique) == n:
                     break
-        
+
         Out.blue(f"Top {len(top_n_unique)} similarities: {[score for _, score in top_n_unique]}")
         Out.blue(f"Top {len(top_n_unique)} documents: {[doc.filename for doc, _ in top_n_unique]}")
         return top_n_unique
@@ -140,14 +159,14 @@ class Brain:
 
 class Template:
     RAG = PromptTemplate(
-        input_variables=["question", "context"],
+        input_variables=["input", "context"],
         template=(
             "You are an assistant specializing in analyzing medical consultation PDFs. "
             "Answer the following question based *only* on the provided context from relevant PDF documents. "
             "If the context doesn't contain the answer, state that the information is not available in the provided documents. "
             "Explicitly mention the filename(s) from the context that support your answer. The context contains markers like '--- Context from filename.pdf ---'.\n\n"
             "Context from PDF documents:\n{context}\n\n"
-            "Question from the patient: {question}\n"
+            "Question from the patient: {input}\n"
             "Your Answer:"
         ),
     )
@@ -179,6 +198,108 @@ class Conversation:
         with open(cache_path, "wb") as f:
             pickle.dump(memory.chat_memory, f)
         Out.green("Conversation history saved successfully")
+
+
+class PDFVectorRetriever(BaseRetriever):
+    def get_relevant_documents(self, query: str) -> list[LC_Document]:
+        query_embedding = Vector.model.encode(query)
+        top_docs = Store.search(query_embedding, n=3)
+        docs = []
+        for doc, _ in top_docs:
+            filepath = os.path.join(PDF_DIR, doc.filename)
+            loader = PyPDFLoader(filepath)
+            pages = loader.load()
+            for page in pages:
+                docs.append(LC_Document(page_content=page.page_content, metadata={"source": doc.filename}))
+        return docs
+
+    async def aget_relevant_documents(self, query: str) -> list[LC_Document]:
+        return self.get_relevant_documents(query)
+
+
+class Agent:
+    EXIT_COMMANDS: set[str] = {"salir", "exit", "quit", "bye", "goodbye", "adiós", "chau"}
+
+    def __init__(self):
+        assert Brain.model, "Brain not initialized. Cannot create agent."
+        self.memory: ConversationSummaryBufferMemory = Conversation.load(Brain.model)
+
+        self.retriever = PDFVectorRetriever()
+
+        combine_docs_chain = create_stuff_documents_chain(llm=Brain.model, prompt=Template.RAG)
+
+        self.rag_chain = create_retrieval_chain(
+            retriever=self.retriever,
+            combine_docs_chain=combine_docs_chain,
+        )
+
+        self.tools: list[Tool] = [
+            Tool(name="SearchWeb", func=Tools.search, description=Tools.search.__doc__),
+            Tool(name="Recommend", func=self.recommend, description="Answers medical questions using PDF documents with history-aware retrieval"),
+            Tool(name="TranslateToSpanish", func=Tools.translate_to_spanish, description=Tools.translate_to_spanish.__doc__),
+        ]
+
+        self.executor: AgentExecutor = initialize_agent(
+            tools=self.tools,
+            llm=Brain.model,
+            agent="chat-conversational-react-description",
+            verbose=True,
+            memory=self.memory,
+            handle_parsing_errors=True,
+            agent_kwargs={
+                "system_message": (
+                    "You are a bilingual (English-Spanish) medical assistant specializing in analyzing medical consultation PDFs. "
+                    "Always respond in the same language as the user's question. "
+                    "For English questions, answer in English. For Spanish questions, answer in Spanish. "
+                    "When a user presents any medical symptoms or health-related questions, ALWAYS use the Recommend tool first "
+                    "to search through the medical PDFs and provide evidence-based information. "
+                    "When answering in Spanish, use simple and clear language that a non-medical audience can understand, "
+                    "and include brief explanations in parentheses for medical terms. "
+                    "Base your answers on the provided context from relevant PDF documents and always reference which documents "
+                    "you used in your response. If the medical information needed is not found in the PDFs, clearly state this "
+                    "and suggest consulting a healthcare professional."
+                )
+            },
+        )
+
+    def recommend(self, query: str) -> str:
+        inputs = {
+            "input": query,
+            "chat_history": self.memory.chat_memory.messages[-3:] if self.memory.chat_memory.messages else [],
+        }
+        return self.rag_chain.invoke(inputs)["answer"]
+
+    def ask(self, query: str) -> str:
+        return self.executor.run(input=query)
+
+    def info(self) -> None:
+        Out.yellow("LangChain Agent Information")
+        Out.white(f"Agent: {self.executor.agent}")
+        Out.white(f"Executor: {self.executor}")
+        Out.white(f"Retriever: {self.retriever}")
+        Out.white(f"PDFs indexed: {len(Store.db)}")
+        Out.white(f"Memory: '{self.memory}'")
+        Out.cyan("Available Tools:")
+        for tool in self.tools:
+            description = tool.description if isinstance(tool.description, str) else "No description available."
+            Out.white(f"- {tool.name}: {description.strip().splitlines()[0]}")
+
+    def start(self):
+        Out.green("\n\n\n¡Bienvenido! Soy su asistente médico virtual. ¿En qué puedo ayudarle hoy?")
+        Out.yellow(f"Type one of {', '.join(sorted(self.EXIT_COMMANDS))} to end.")
+
+        while True:
+            user_input = Out.input(">>> ")
+            if user_input.lower() in self.EXIT_COMMANDS:
+                Out.yellow("Agent: Goodbye!")
+                break
+            if not user_input:
+                continue
+            response = self.ask(user_input)
+            Out.green(f"Agent: {response}")
+
+        Conversation.save(self.memory)
+        Out.green("Chat ended.")
 
 
 class Tools:
@@ -217,56 +338,6 @@ class Tools:
         return " ".join(text.split())
 
     @staticmethod
-    def find_relevant_pdfs(query: str, top_k: int = 10) -> str:
-        """
-        Finds the most relevant PDF documents based on the user query using embeddings.
-        Returns a JSON string list of dictionaries, each containing 'filename' and 'score'.
-        Input must be the user's query string.
-        """
-        assert Store.db, "Store.db has not been initialized."
-        assert Vector.model, "Vector model not loaded. Cannot perform PDF search."
-        
-        query = query.lower().strip()
-        query_embedding = Vector.model.encode(query)
-        query_embedding = query_embedding.flatten() if query_embedding.ndim > 1 else query_embedding
-        
-        top_docs = Store.search(query_embedding, top_k)
-        results = []
-        for doc, score in top_docs:
-            Out.blue(f"Document: {doc.filename}, Score: {score}")
-            results.append({
-                "filename": doc.filename,
-                "score": score
-            })
-        return json.dumps(results)
-
-    @staticmethod
-    def recommend(query: str) -> str:
-        """
-        Answers questions based on the content of available PDF medical consultation documents.
-        Uses FindRelevantPDFs and ExtractPDFText to gather context, then synthesizes an answer.
-        Input must be the user's question.
-        """
-        assert Brain.model, "Brain not initialized. Cannot generate recommendations."
-        relevant_files_json = Tools.find_relevant_pdfs(query)
-        relevant_files_info = json.loads(relevant_files_json)
-        assert relevant_files_info, "No relevant PDF documents found for your query."
-
-        context_parts = []
-        extracted_filenames = set()
-
-        for file_info in relevant_files_info:
-            filename = file_info["filename"]
-            doc_text = Tools.extract_pdf_text(filename)
-            context_parts.append(f"--- Context from {filename} ---\n{doc_text}\n--- ")
-            extracted_filenames.add(filename)
-
-        context = "\n".join(context_parts)
-        rag_chain = LLMChain(llm=Brain.model, prompt=Template.RAG)
-        response = rag_chain.run(question=query, context=context)
-        return response
-
-    @staticmethod
     def translate_to_spanish(text: str) -> str:
         """
         Translates English medical text to simple Spanish that non-medical audiences can understand.
@@ -276,77 +347,6 @@ class Tools:
         assert Brain.model, "Brain not initialized. Cannot perform translation."
         chain = LLMChain(llm=Brain.model, prompt=Template.TRANSLATE)
         return chain.run(text=text)
-
-
-class Agent:
-    EXIT_COMMANDS: set[str] = {"salir", "exit", "quit", "bye", "goodbye", "adiós", "chau"}
-
-    def __init__(self):
-        assert Brain.model, "Brain not initialized. Cannot create agent."
-        self.memory: ConversationSummaryBufferMemory = Conversation.load(Brain.model)
-
-        self.tools: list[Tool] = [
-            Tool(name='SearchWeb', func=Tools.search, description=Tools.search.__doc__),
-            Tool(name='ExtractPDFText', func=Tools.extract_pdf_text, description=Tools.extract_pdf_text.__doc__),
-            Tool(name='FindRelevantPDFs', func=Tools.find_relevant_pdfs, description=Tools.find_relevant_pdfs.__doc__),
-            Tool(name='Recommend', func=Tools.recommend, description=Tools.recommend.__doc__),
-            Tool(name='TranslateToSpanish', func=Tools.translate_to_spanish, description=Tools.translate_to_spanish.__doc__),
-        ]
-
-        self.executor: AgentExecutor = initialize_agent(
-            tools=self.tools,
-            llm=Brain.model,
-            agent="chat-conversational-react-description",
-            verbose=True,
-            memory=self.memory,
-            handle_parsing_errors=True,
-            agent_kwargs={
-                "system_message": (
-                    "You are a bilingual (English-Spanish) medical assistant specializing in analyzing medical consultation PDFs. "
-                    "Always respond in the same language as the user's question. "
-                    "For English questions, answer in English. For Spanish questions, answer in Spanish. "
-                    "When a user presents any medical symptoms or health-related questions, ALWAYS use the Recommend tool first "
-                    "to search through the medical PDFs and provide evidence-based information. "
-                    "When answering in Spanish, use simple and clear language that a non-medical audience can understand, "
-                    "and include brief explanations in parentheses for medical terms. "
-                    "Base your answers on the provided context from relevant PDF documents and always reference which documents "
-                    "you used in your response. If the medical information needed is not found in the PDFs, clearly state this "
-                    "and suggest consulting a healthcare professional."
-                )
-            },
-        )
-
-    def ask(self, query: str) -> str:
-        return self.executor.run(input=query)
-
-
-    def info(self) -> None:
-        Out.yellow("LangChain Agent Information")
-        Out.white(f"Agent: {self.executor.agent}")
-        Out.white(f"Executor: {self.executor}")
-        Out.cyan("Available Tools:")
-        for tool in self.tools:
-            description = tool.description if isinstance(tool.description, str) else "No description available."
-            Out.white(f"- {tool.name}: {description.strip().splitlines()[0]}")
-        Out.cyan(f"PDFs indexed: {len(Store.db)}")
-        Out.cyan(f"Memory: '{self.memory}'")
-
-    def start(self):
-        Out.green("\n\n\n¡Bienvenido! Soy su asistente médico virtual. ¿En qué puedo ayudarle hoy?")
-        Out.yellow(f"Type one of {', '.join(sorted(self.EXIT_COMMANDS))} to end.")
-
-        while True:
-            user_input = Out.input(">>> ")
-            if user_input.lower() in self.EXIT_COMMANDS:
-                Out.yellow("Agent: Goodbye!")
-                break
-            if not user_input:
-                continue
-            response = self.ask(user_input)
-            Out.green(f"Agent: {response}")
-
-        Conversation.save(self.memory)
-        Out.green("Chat ended.")
 
 
 if __name__ == "__main__":

@@ -29,18 +29,38 @@ BOILERPLATE_PATTERNS = [
 ]
 
 COMMON_WORDS = {
-    "fecha", "consulta", "paciente", "médico", "motivo", "diagnóstico",
-    "recomendación", "medicamento", "prescripto", "dr", "doctor", "dra",
-    "doctora", "informe", "médica", "medical", "consultation", "report",
-    "día", "mes", "año", "tratamiento", "análisis", "evaluación",
-    "realizar", "iniciar", "programar", "controlar"
+    "fecha",
+    "consulta",
+    "paciente",
+    "médico",
+    "motivo",
+    "diagnóstico",
+    "recomendación",
+    "medicamento",
+    "prescripto",
+    "dr",
+    "doctor",
+    "dra",
+    "doctora",
+    "informe",
+    "médica",
+    "medical",
+    "consultation",
+    "report",
+    "día",
+    "mes",
+    "año",
+    "tratamiento",
+    "análisis",
+    "evaluación",
+    "realizar",
+    "iniciar",
+    "programar",
+    "controlar",
 }
 
 TEXT_SPLITTER = RecursiveCharacterTextSplitter(
-    chunk_size=CHUNK_SIZE,
-    chunk_overlap=CHUNK_OVERLAP,
-    length_function=len,
-    separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+    chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, length_function=len, separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
 )
 
 
