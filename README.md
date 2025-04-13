@@ -1,17 +1,8 @@
 # LangChain Virtual Assistant
 
-A virtual assistant built using LangChain that can process PDFs, perform web searches, and answer questions using RAG (Retrieval-Augmented Generation).
+LangChain Virtual Assistant
 
-## Features
-
-- PDF processing and text extraction
-- Web search capabilities
-- RAG-based question answering
-- Conversation memory
-- Vector embeddings for semantic search
-- PDF caching for faster processing
-
-## Installation
+## Setup
 
 1. Clone the repository:
 
@@ -26,49 +17,18 @@ cd langchain-virtual-assistant
 poetry install
 ```
 
-3. Copy the environment variables template and fill in your API keys:
+3. Place your PDF files in the [./pdfs](./pdfs) directory
+
+4. Set the OpenAI API Key.
 
 ```bash
-cp .env.example .env
+export OPENAI_API_KEY="lorem-ipsum"
 ```
 
 ## Usage
 
-1. Place your PDF files in the [./pdfs](./pdfs) directory
-2. Run the assistant:
+1. Simply run the smart agent:
+
 ```bash
-poetry run python src/langchain_agent_project/agent.py
+poetry run python agent.py
 ```
-
-3. Interact with the assistant in the terminal. Type 'salir', 'exit', or 'quit' to end the session.
-
-## Project Structure
-
-```
-langchain_agent_project/
-├── .env
-├── pyproject.toml
-├── README.md
-├── src/
-│   └── langchain_agent_project/
-│       ├── __init__.py
-│       └── agent.py
-└── pdfs/
-```
-
-## Dependencies
-
-- Python 3.9+
-- LangChain
-- OpenAI API
-- FAISS
-- PyPDF
-- BeautifulSoup4
-- Requests
-- Transformers (optional, for local models)
-
-## License
-
-MIT
-
-
