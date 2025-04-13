@@ -81,19 +81,12 @@ class Vector:
 @dataclass
 class Document:
     filename: str
-    chunk_index: int
-    hash: str
-    embedding: np.ndarray
+    embeddings: list[np.ndarray]
 
     @classmethod
     def from_dict(cls, data: dict) -> Document:
-        embedding = np.array(data["embedding"]).flatten()
-        return cls(
-            filename=data["filename"],
-            chunk_index=data["chunk_index"],
-            hash=data["hash"],
-            embedding=embedding
-        )
+        embeddings = [np.array(emb).flatten() for emb in data["embeddings"]]
+        return cls(filename=data["filename"], embeddings=embeddings)
 
 
 class Store:
@@ -105,19 +98,35 @@ class Store:
         with open(filepath, "r") as f:
             raw_data = json.load(f)
         cls.db = [Document.from_dict(item) for item in raw_data]
-        Out.green(f"Store loaded with {len(cls.db)} chunks from documents")
+        total_embeddings = sum(len(doc.embeddings) for doc in cls.db)
+        Out.green(f"Store loaded with {len(cls.db)} documents and {total_embeddings} total embeddings")
 
     @classmethod
-    def search(cls, query_embedding: np.ndarray, n: int = 3) -> list[Document]:
+    def search(cls, query_embedding: np.ndarray, n: int = 3) -> list[tuple[Document, float]]:
         assert cls.db, "Store.db has not been initialized."
         query_embedding = query_embedding.flatten()
-        similarities = [Vector.distance(query_embedding, doc.embedding) for doc in cls.db]
-        k = min(n, len(cls.db))
-        top_k_indices = np.argsort(similarities)[-k:][::-1]
-        top_docs = [cls.db[int(i)] for i in top_k_indices]
-        Out.blue(f"Top {k} similarities: {[similarities[i] for i in top_k_indices]}")
-        Out.blue(f"Top {k} documents: {[f'{doc.filename}:chunk_{doc.chunk_index}' for doc in top_docs]}")
-        return top_docs
+        
+        all_similarities: list[tuple[Document, float]] = []
+        for doc in cls.db:
+            for emb in doc.embeddings:
+                similarity = Vector.distance(query_embedding, emb)
+                all_similarities.append((doc, similarity))
+        
+        all_similarities.sort(key=lambda x: x[1], reverse=True)
+        
+        top_n_unique: list[tuple[Document, float]] = []
+        seen_filenames = set()
+        
+        for doc, score in all_similarities:
+            if doc.filename not in seen_filenames:
+                seen_filenames.add(doc.filename)
+                top_n_unique.append((doc, score))
+                if len(top_n_unique) == n:
+                    break
+        
+        Out.blue(f"Top {len(top_n_unique)} similarities: {[score for _, score in top_n_unique]}")
+        Out.blue(f"Top {len(top_n_unique)} documents: {[doc.filename for doc, _ in top_n_unique]}")
+        return top_n_unique
 
 
 class Brain:
@@ -194,13 +203,9 @@ class Tools:
         """
         Extracts and returns the text content of a specific PDF file given its filename using PyPDFLoader.
         The filename must exactly match one of the files listed by `list_pdfs`.
-        Input can be just the filename or filename|chunk_size|chunk_overlap for chunked extraction.
-        Returns either the full text or a JSON string containing text chunks if chunk parameters are provided.
+        Input must be the filename.
+        Returns the full text content of the PDF.
         """
-        params = filename.split("|")
-        filename = params[0]
-        chunk_index = int(params[1]) if len(params) > 1 else None
-
         filepath = os.path.join(PDF_DIR, filename)
         assert os.path.exists(filepath), f"Error: PDF file '{filename}' not found in directory '{PDF_DIR}'."
 
@@ -209,23 +214,10 @@ class Tools:
         assert docs, f"No content loaded from {filename} using PyPDFLoader."
 
         text = "\n".join(doc.page_content for doc in docs)
-        cleaned_text = " ".join(text.split())
-
-        if chunk_index is not None:
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=50,
-                length_function=len,
-                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
-            )
-            chunks = text_splitter.split_text(cleaned_text)
-            if 0 <= chunk_index < len(chunks):
-                return chunks[chunk_index]
-            return cleaned_text
-        return cleaned_text
+        return " ".join(text.split())
 
     @staticmethod
-    def find_relevant_pdfs(query: str, top_k: int = 3) -> str:
+    def find_relevant_pdfs(query: str, top_k: int = 10) -> str:
         """
         Finds the most relevant PDF documents based on the user query using embeddings.
         Returns a JSON string list of dictionaries, each containing 'filename' and 'score'.
@@ -240,12 +232,10 @@ class Tools:
         
         top_docs = Store.search(query_embedding, top_k)
         results = []
-        for doc in top_docs:
-            score = Vector.distance(query_embedding, doc.embedding)
-            Out.blue(f"Document: {doc.filename}:chunk_{doc.chunk_index}, Score: {score}")
+        for doc, score in top_docs:
+            Out.blue(f"Document: {doc.filename}, Score: {score}")
             results.append({
                 "filename": doc.filename,
-                "chunk_index": doc.chunk_index,
                 "score": score
             })
         return json.dumps(results)
@@ -267,9 +257,8 @@ class Tools:
 
         for file_info in relevant_files_info:
             filename = file_info["filename"]
-            chunk_index = file_info["chunk_index"]
-            doc_text = Tools.extract_pdf_text(f"{filename}|{chunk_index}")
-            context_parts.append(f"--- Context from {filename} (chunk {chunk_index}) ---\n{doc_text}\n--- ")
+            doc_text = Tools.extract_pdf_text(filename)
+            context_parts.append(f"--- Context from {filename} ---\n{doc_text}\n--- ")
             extracted_filenames.add(filename)
 
         context = "\n".join(context_parts)
