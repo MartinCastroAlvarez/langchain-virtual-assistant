@@ -1,21 +1,29 @@
-import os
-import json
-import hashlib
-import fitz  # PyMuPDF
-from sentence_transformers import SentenceTransformer
 import glob
+import hashlib
+import json
+import os
+from dataclasses import asdict
+from dataclasses import dataclass
+from dataclasses import field
+
+import fitz
+import numpy as np
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
-from dataclasses import dataclass, asdict, field
 
 PDF_DIR = "pdfs"
 DATABASE_FILE = "vectorstore.json"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 CACHE_DIR = "./.cache/sentence_transformers"
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
 
 
 @dataclass
 class Document:
     filename: str
+    chunk_index: int
     text: str
     hash: str
     embedding: list[float]
@@ -23,6 +31,7 @@ class Document:
     def to_dict(self) -> dict:
         return {
             "filename": self.filename,
+            "chunk_index": self.chunk_index,
             "hash": self.hash,
             "embedding": self.embedding,
         }
@@ -31,6 +40,15 @@ class Document:
 @dataclass
 class Pdf:
     filepath: str
+    text_splitter: RecursiveCharacterTextSplitter = field(init=False)
+
+    def __post_init__(self):
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            length_function=len,
+            separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+        )
 
     @property
     def filename(self) -> str:
@@ -46,18 +64,14 @@ class Pdf:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def get_text(self) -> str | None:
-        try:
-            doc = fitz.open(self.filepath)
-            text = ""
-            for page in doc:
-                text += page.get_text()
-            doc.close()
-            text = " ".join(text.replace("\n", " ").split())
-            return text
-        except Exception as e:
-            print(f"Error extracting text from {self.filename}: {e}")
-            return None
+    def get_chunks(self) -> list[str]:
+        doc = fitz.open(self.filepath)
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        doc.close()
+        text = " ".join(text.replace("\n", " ").split())
+        return self.text_splitter.split_text(text)
 
 
 @dataclass
@@ -78,27 +92,34 @@ class Indexer:
 
     def run(self):
         assert os.path.exists(self.pdf_dir), f"Error: Directory '{self.pdf_dir}' not found."
-
         pdf_filepaths = glob.glob(os.path.join(self.pdf_dir, "*.pdf"))
         assert pdf_filepaths, f"No PDF files found in '{self.pdf_dir}'."
 
         print(f"Processing {len(pdf_filepaths)} PDF files...")
         documents: list[Document] = []
-        for filepath in tqdm(pdf_filepaths, desc="Reading PDFs and Hashing"):
+        
+        for filepath in tqdm(pdf_filepaths, desc="Reading PDFs and Chunking"):
             pdf = Pdf(filepath)
             file_hash = pdf.get_hash()
-            text = pdf.get_text()
-            assert text, f"No text could be extracted from {pdf.filename}."
-            document = Document(filename=pdf.filename, text=text, hash=file_hash, embedding=[])
-            documents.append(document)
+            chunks = pdf.get_chunks()
+            
+            for i, chunk_text in enumerate(chunks):
+                document = Document(
+                    filename=pdf.filename,
+                    chunk_index=i,
+                    text=chunk_text,
+                    hash=f"{file_hash}_{i}",
+                    embedding=[]
+                )
+                documents.append(document)
 
-        print("Generating embeddings...")
-        texts: list[str] = [doc.text for doc in documents]
-        embeddings = self.model.encode(texts, show_progress_bar=True).tolist()
+        print(f"Generating embeddings for {len(documents)} chunks...")
+        texts = [doc.text for doc in documents]
+        embeddings = self.model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
 
         print("Embedding documents...")
         for doc, embedding in zip(documents, embeddings):
-            doc.embedding = embedding
+            doc.embedding = embedding.tolist()
 
         print("Writing database...")
         database = [doc.to_dict() for doc in documents]

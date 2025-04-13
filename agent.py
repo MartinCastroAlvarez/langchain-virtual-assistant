@@ -1,67 +1,140 @@
 from __future__ import annotations
-import os
+
 import json
+import os
 import pickle
-import requests
-import numpy as np
 from dataclasses import dataclass
+
+import numpy as np
+import requests
 from bs4 import BeautifulSoup
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from langchain.agents import initialize_agent, Tool
+from colorama import Fore, Style
+from langchain.agents import AgentExecutor
+from langchain.agents import Tool
+from langchain.agents import initialize_agent
+from langchain.chains import LLMChain
 from langchain.chat_models import ChatOpenAI
+from langchain.document_loaders import PyPDFLoader
 from langchain.memory import ConversationSummaryBufferMemory
 from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY")
 assert OPENAI_API_KEY, "OPENAI_API_KEY not found in environment variables."
 
-PDF_DIR = "pdfs"
-VECTORSTORE_FILE = "vectorstore.json"
-CONVERSATION_CACHE = "conversation_cache.pkl"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-CACHE_DIR = "./.cache/sentence_transformers"
-VECTOR_DATA = {}
-QUERY_EMBEDDING_MODEL = None
+PDF_DIR: str = "pdfs"
+VECTORSTORE_FILE: str = "vectorstore.json"
+CONVERSATION_CACHE: str = "conversation_cache.pkl"
+EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
+CACHE_DIR: str = "./.cache/sentence_transformers"
+
+
+class Out:
+    @staticmethod
+    def green(message: str) -> None:
+        print(f"{Fore.GREEN}{message}{Style.RESET_ALL}")
+
+    @staticmethod
+    def red(message: str) -> None:
+        print(f"{Fore.RED}{message}{Style.RESET_ALL}")
+
+    @staticmethod
+    def cyan(message: str) -> None:
+        print(f"{Fore.CYAN}{message}{Style.RESET_ALL}")
+
+    @staticmethod
+    def yellow(message: str) -> None:
+        print(f"{Fore.YELLOW}{message}{Style.RESET_ALL}")
+
+    @staticmethod
+    def blue(message: str) -> None:
+        print(f"{Fore.BLUE}{message}{Style.RESET_ALL}")
+
+    @staticmethod
+    def white(message: str) -> None:
+        print(f"{Fore.WHITE}{message}{Style.RESET_ALL}")
+
+    @staticmethod
+    def input(prompt: str = "") -> str:
+        return input(f"{Fore.CYAN}{prompt}{Style.RESET_ALL}")
+
+
+class Vector:
+    model: SentenceTransformer | None = None
+
+    @classmethod
+    def load(cls) -> None:
+        cls.model = SentenceTransformer(EMBEDDING_MODEL_NAME, cache_folder=CACHE_DIR)
+        Out.green(f"Vector model loaded with {len(cls.model.encode('test'))} dimensions")
+
+    @classmethod
+    def distance(cls, query_embedding: np.ndarray, doc_embedding: np.ndarray) -> float:
+        query_embedding = query_embedding.flatten()
+        doc_embedding = doc_embedding.flatten()
+        query_embedding = query_embedding.reshape(1, -1)
+        doc_embedding = doc_embedding.reshape(1, -1)
+        return float(cosine_similarity(query_embedding, doc_embedding)[0][0])
 
 
 @dataclass
 class Document:
     filename: str
+    chunk_index: int
     hash: str
     embedding: np.ndarray
 
     @classmethod
     def from_dict(cls, data: dict) -> Document:
-        return cls(filename=data["filename"], hash=data["hash"], embedding=np.array(data["embedding"]))
+        embedding = np.array(data["embedding"]).flatten()
+        return cls(
+            filename=data["filename"],
+            chunk_index=data["chunk_index"],
+            hash=data["hash"],
+            embedding=embedding
+        )
 
 
 class Store:
+    db: list[Document] = []
+
     @classmethod
-    def load(cls, filepath: str) -> list[Document]:
-        if not os.path.exists(filepath):
-            print(f"Warning: Vectorstore file not found at {filepath}. PDF RAG will not work.")
-            return []
+    def load(cls, filepath: str = VECTORSTORE_FILE) -> None:
+        assert os.path.exists(filepath), f"Vectorstore file not found at {filepath}. PDF RAG will not work."
         with open(filepath, "r") as f:
             raw_data = json.load(f)
-        documents = [Document.from_dict(item) for item in raw_data]
-        print(f"Loaded {len(documents)} documents from {filepath}")
-        return documents
+        cls.db = [Document.from_dict(item) for item in raw_data]
+        Out.green(f"Store loaded with {len(cls.db)} chunks from documents")
+
+    @classmethod
+    def search(cls, query_embedding: np.ndarray, n: int = 3) -> list[Document]:
+        assert cls.db, "Store.db has not been initialized."
+        query_embedding = query_embedding.flatten()
+        similarities = [Vector.distance(query_embedding, doc.embedding) for doc in cls.db]
+        k = min(n, len(cls.db))
+        top_k_indices = np.argsort(similarities)[-k:][::-1]
+        top_docs = [cls.db[int(i)] for i in top_k_indices]
+        Out.blue(f"Top {k} similarities: {[similarities[i] for i in top_k_indices]}")
+        Out.blue(f"Top {k} documents: {[f'{doc.filename}:chunk_{doc.chunk_index}' for doc in top_docs]}")
+        return top_docs
+
+
+class Brain:
+    model: ChatOpenAI | None = None
+
+    @classmethod
+    def load(cls) -> None:
+        cls.model = ChatOpenAI(temperature=0, openai_api_key=OPENAI_API_KEY, model_name="gpt-3.5-turbo")
+        Out.green(f"Brain model loaded with {cls.model.model_name}")
 
 
 class Template:
-    CONTEXT = PromptTemplate(
-        input_variables=[],
+    RAG = PromptTemplate(
+        input_variables=["question", "context"],
         template=(
             "You are an assistant specializing in analyzing medical consultation PDFs. "
             "Answer the following question based *only* on the provided context from relevant PDF documents. "
-        ),
-    )
-    RAG_PROMPT = PromptTemplate(
-        input_variables=["question", "context"],
-        template=(
             "If the context doesn't contain the answer, state that the information is not available in the provided documents. "
             "Explicitly mention the filename(s) from the context that support your answer. The context contains markers like '--- Context from filename.pdf ---'.\n\n"
             "Context from PDF documents:\n{context}\n\n"
@@ -70,28 +143,36 @@ class Template:
         ),
     )
 
+    TRANSLATE = PromptTemplate(
+        input_variables=["text"],
+        template=(
+            "Translate the following English medical text to Spanish, using simple and clear language that a non-medical audience can understand. "
+            "If there are medical terms, provide simple explanations in parentheses. Keep the tone friendly and accessible.\n\n"
+            "English text: {text}\n\n"
+            "Simple Spanish translation:"
+        ),
+    )
+
 
 class Conversation:
     @classmethod
-    def load(cls, llm: ChatOpenAI, cache_path: str, max_token_limit: int = 1000) -> ConversationSummaryBufferMemory:
-        print(f"Loading conversation history from {cache_path}")
+    def load(cls, llm: ChatOpenAI, cache_path: str = CONVERSATION_CACHE, max_token_limit: int = 1000) -> ConversationSummaryBufferMemory:
+        Out.blue(f"Loading conversation history from {cache_path}")
         memory = ConversationSummaryBufferMemory(llm=llm, max_token_limit=max_token_limit, memory_key="chat_history", return_messages=True)
         if os.path.exists(cache_path):
-            print(f"Loading conversation history from {cache_path}")
             with open(cache_path, "rb") as f:
                 memory.chat_memory = pickle.load(f)
         return memory
 
     @classmethod
-    def save(cls, memory: ConversationSummaryBufferMemory, cache_path: str) -> None:
-        print(f"Saving conversation history to {cache_path}")
+    def save(cls, memory: ConversationSummaryBufferMemory, cache_path: str = CONVERSATION_CACHE) -> None:
+        Out.blue(f"Saving conversation history to {cache_path}")
         with open(cache_path, "wb") as f:
             pickle.dump(memory.chat_memory, f)
-        print(f"Conversation history saved to {cache_path}")
+        Out.green("Conversation history saved successfully")
 
 
-class AgentTools:
-
+class Tools:
     @staticmethod
     def search(query: str) -> str:
         """
@@ -99,214 +180,190 @@ class AgentTools:
         Useful for finding current information or topics not covered in the internal knowledge or documents.
         Input must be a search query string.
         """
-        print(f"Searching for {query} on Google...")
-        try:
-            url = f"https://www.google.com/search?q={query}"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            res = requests.get(url, headers=headers, timeout=10)
-            res.raise_for_status()
-            soup = BeautifulSoup(res.text, "html.parser")
-            text = soup.get_text()
-            return text[:2000] if text else "No content found."
-        except requests.RequestException as e:
-            return f"Error during web search: {e}"
-        except Exception as e:
-            return f"An unexpected error occurred during web search: {e}"
-
-    @staticmethod
-    def list_pdfs(_: str) -> str:
-        """
-        Lists the filenames of all the PDF documents that are available in the internal knowledge base.
-        Does not take any input arguments (input can be an empty string or ignored).
-        Returns a newline-separated list of filenames.
-        """
-        assert VECTOR_DATA, "No PDF documents have been indexed."
-        print(f"Listing {len(VECTOR_DATA)} PDF documents...")
-        filenames = [doc.filename for doc in VECTOR_DATA]
-        return "\n".join(filenames) if filenames else "No PDF filenames found in the index."
+        url = f"https://www.google.com/search?q={query}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        main_content = soup.find("body")
+        text = main_content.get_text(separator=" ", strip=True) if main_content else soup.get_text(separator=" ", strip=True)
+        return text[:2000] if text else "No content found."
 
     @staticmethod
     def extract_pdf_text(filename: str) -> str:
         """
-        Extracts and returns the full text content of a specific PDF file given its filename using PyPDFLoader.
+        Extracts and returns the text content of a specific PDF file given its filename using PyPDFLoader.
         The filename must exactly match one of the files listed by `list_pdfs`.
-        Input must be the exact filename of the PDF.
+        Input can be just the filename or filename|chunk_size|chunk_overlap for chunked extraction.
+        Returns either the full text or a JSON string containing text chunks if chunk parameters are provided.
         """
-        print(f"Extracting text from {filename}...")
+        params = filename.split("|")
+        filename = params[0]
+        chunk_index = int(params[1]) if len(params) > 1 else None
+
         filepath = os.path.join(PDF_DIR, filename)
         assert os.path.exists(filepath), f"Error: PDF file '{filename}' not found in directory '{PDF_DIR}'."
-        try:
-            loader = PyPDFLoader(filepath)
-            docs = loader.load()
-            text = "\n".join([doc.page_content for doc in docs])
-            cleaned_text = " ".join(text.replace("\n", " ").split())
-            return cleaned_text if cleaned_text else f"No text could be extracted from {filename}."
-        except Exception as e:
-            return f"Error extracting text from {filename} using PyPDFLoader: {e}"
+
+        loader = PyPDFLoader(filepath)
+        docs = loader.load()
+        assert docs, f"No content loaded from {filename} using PyPDFLoader."
+
+        text = "\n".join(doc.page_content for doc in docs)
+        cleaned_text = " ".join(text.split())
+
+        if chunk_index is not None:
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500,
+                chunk_overlap=50,
+                length_function=len,
+                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
+            )
+            chunks = text_splitter.split_text(cleaned_text)
+            if 0 <= chunk_index < len(chunks):
+                return chunks[chunk_index]
+            return cleaned_text
+        return cleaned_text
 
     @staticmethod
     def find_relevant_pdfs(query: str, top_k: int = 3) -> str:
         """
         Finds the most relevant PDF documents based on the user query using embeddings.
-        Returns a list of filenames and their relevance scores.
+        Returns a JSON string list of dictionaries, each containing 'filename' and 'score'.
         Input must be the user's query string.
         """
-        assert VECTOR_DATA, "No vector data loaded. Cannot perform PDF search."
-        assert QUERY_EMBEDDING_MODEL, "Query embedding model not loaded. Cannot perform PDF search."
-
-        print(f"Finding relevant PDFs for query: {query}")
-        query_embedding = QUERY_EMBEDDING_MODEL.encode([query])
-        doc_embeddings = np.array([doc.embedding for doc in VECTOR_DATA])
-        similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
-        k = min(top_k, len(VECTOR_DATA))
-        if k == 0:
-            return "No documents available to search."
-
-        top_k_indices = np.argsort(similarities)[-k:][::-1]
+        assert Store.db, "Store.db has not been initialized."
+        assert Vector.model, "Vector model not loaded. Cannot perform PDF search."
+        
+        query = query.lower().strip()
+        query_embedding = Vector.model.encode(query)
+        query_embedding = query_embedding.flatten() if query_embedding.ndim > 1 else query_embedding
+        
+        top_docs = Store.search(query_embedding, top_k)
         results = []
-        print(f"\n--- Found {len(top_k_indices)} relevant documents ---")
-        for i in top_k_indices:
-            doc_info = VECTOR_DATA[i]
-            filename = doc_info.filename
-            similarity_score = similarities[i]
-            print(f"- {filename} (Similarity: {similarity_score:.4f})")
-            results.append({"filename": filename, "score": float(similarity_score)})
-        print("-------------------------------------")
-
-        if not results:
-            return "No relevant PDF documents found."
-
+        for doc in top_docs:
+            score = Vector.distance(query_embedding, doc.embedding)
+            Out.blue(f"Document: {doc.filename}:chunk_{doc.chunk_index}, Score: {score}")
+            results.append({
+                "filename": doc.filename,
+                "chunk_index": doc.chunk_index,
+                "score": score
+            })
         return json.dumps(results)
+
+    @staticmethod
+    def recommend(query: str) -> str:
+        """
+        Answers questions based on the content of available PDF medical consultation documents.
+        Uses FindRelevantPDFs and ExtractPDFText to gather context, then synthesizes an answer.
+        Input must be the user's question.
+        """
+        assert Brain.model, "Brain not initialized. Cannot generate recommendations."
+        relevant_files_json = Tools.find_relevant_pdfs(query)
+        relevant_files_info = json.loads(relevant_files_json)
+        assert relevant_files_info, "No relevant PDF documents found for your query."
+
+        context_parts = []
+        extracted_filenames = set()
+
+        for file_info in relevant_files_info:
+            filename = file_info["filename"]
+            chunk_index = file_info["chunk_index"]
+            doc_text = Tools.extract_pdf_text(f"{filename}|{chunk_index}")
+            context_parts.append(f"--- Context from {filename} (chunk {chunk_index}) ---\n{doc_text}\n--- ")
+            extracted_filenames.add(filename)
+
+        context = "\n".join(context_parts)
+        rag_chain = LLMChain(llm=Brain.model, prompt=Template.RAG)
+        response = rag_chain.run(question=query, context=context)
+        return response
+
+    @staticmethod
+    def translate_to_spanish(text: str) -> str:
+        """
+        Translates English medical text to simple Spanish that non-medical audiences can understand.
+        Medical terms will include simple explanations in parentheses.
+        Input must be the English text to translate.
+        """
+        assert Brain.model, "Brain not initialized. Cannot perform translation."
+        chain = LLMChain(llm=Brain.model, prompt=Template.TRANSLATE)
+        return chain.run(text=text)
 
 
 class Agent:
-    def __init__(self, api_key: str, conv_cache_path: str):
-        self.api_key = api_key
-        self.conv_cache_path = conv_cache_path
-        self.llm = ChatOpenAI(temperature=0, openai_api_key=self.api_key, model_name="gpt-3.5-turbo")
-        self.memory = Conversation.load(self.llm, self.conv_cache_path)
-        self.rag_chain = LLMChain(
-            llm=self.llm,
-            prompt=PromptTemplate(input_variables=["question", "context"], template=Template.CONTEXT.template + "\n" + Template.RAG_PROMPT.template),
-        )
+    EXIT_COMMANDS: set[str] = {"salir", "exit", "quit", "bye", "goodbye", "adiós", "chau"}
 
-        self.tools = [
-            Tool(name="SearchWeb", func=AgentTools.search, description=AgentTools.search.__doc__),
-            Tool(name="ListAvailablePDFs", func=AgentTools.list_pdfs, description=AgentTools.list_pdfs.__doc__),
-            Tool(name="ExtractPDFText", func=AgentTools.extract_pdf_text, description=AgentTools.extract_pdf_text.__doc__),
-            Tool(name="FindRelevantPDFs", func=AgentTools.find_relevant_pdfs, description=AgentTools.find_relevant_pdfs.__doc__),
-            Tool(
-                name="AnswerQuestionFromPDFs",
-                func=self._answer_from_pdfs,
-                description=(
-                    "Answers questions based *specifically* on the content of the available PDF medical consultation documents found using FindRelevantPDFs and ExtractPDFText. "
-                    "Use this when the user asks about past cases, diagnoses, recommendations, or specific information likely contained within PDF files. "
-                    "Input must be the user's question. This tool will automatically find relevant PDFs, extract their content, and synthesize an answer."
-                ),
-            ),
+    def __init__(self):
+        assert Brain.model, "Brain not initialized. Cannot create agent."
+        self.memory: ConversationSummaryBufferMemory = Conversation.load(Brain.model)
+
+        self.tools: list[Tool] = [
+            Tool(name='SearchWeb', func=Tools.search, description=Tools.search.__doc__),
+            Tool(name='ExtractPDFText', func=Tools.extract_pdf_text, description=Tools.extract_pdf_text.__doc__),
+            Tool(name='FindRelevantPDFs', func=Tools.find_relevant_pdfs, description=Tools.find_relevant_pdfs.__doc__),
+            Tool(name='Recommend', func=Tools.recommend, description=Tools.recommend.__doc__),
+            Tool(name='TranslateToSpanish', func=Tools.translate_to_spanish, description=Tools.translate_to_spanish.__doc__),
         ]
 
-        agent_kwargs = {"system_message": Template.CONTEXT.template}
-
-        self.agent_executor = initialize_agent(
+        self.executor: AgentExecutor = initialize_agent(
             tools=self.tools,
-            llm=self.llm,
+            llm=Brain.model,
             agent="chat-conversational-react-description",
             verbose=True,
             memory=self.memory,
             handle_parsing_errors=True,
-            agent_kwargs=agent_kwargs,
+            agent_kwargs={
+                "system_message": (
+                    "You are a bilingual (English-Spanish) medical assistant specializing in analyzing medical consultation PDFs. "
+                    "Always respond in the same language as the user's question. "
+                    "For English questions, answer in English. For Spanish questions, answer in Spanish. "
+                    "When a user presents any medical symptoms or health-related questions, ALWAYS use the Recommend tool first "
+                    "to search through the medical PDFs and provide evidence-based information. "
+                    "When answering in Spanish, use simple and clear language that a non-medical audience can understand, "
+                    "and include brief explanations in parentheses for medical terms. "
+                    "Base your answers on the provided context from relevant PDF documents and always reference which documents "
+                    "you used in your response. If the medical information needed is not found in the PDFs, clearly state this "
+                    "and suggest consulting a healthcare professional."
+                )
+            },
         )
 
-    def _answer_from_pdfs(self, query: str) -> str:
-        relevant_files_json = AgentTools.find_relevant_pdfs(query)
-        if (
-            relevant_files_json.startswith("Error:")
-            or "No documents available" in relevant_files_json
-            or "No relevant PDF documents found" in relevant_files_json
-        ):
-            return f"Could not find relevant PDF documents for your query. {relevant_files_json}"
-
-        try:
-            relevant_files_info = json.loads(relevant_files_json)
-            if not relevant_files_info:
-                return "No relevant PDF documents found."
-        except json.JSONDecodeError:
-            return f"Error decoding relevant PDF information: {relevant_files_json}"
-
-        context_parts = []
-        extracted_filenames = []
-        for file_info in relevant_files_info:
-            filename = file_info.get("filename")
-            if not filename:
-                continue
-            print(f"Extracting text from relevant file: {filename}")
-            doc_text = AgentTools.extract_pdf_text(filename)
-            if not doc_text.startswith("Error:"):
-                context_parts.append(f"--- Context from {filename} ---\n{doc_text}\n---")
-                extracted_filenames.append(filename)
-            else:
-                print(f"Warning: {doc_text}")
-                context_parts.append(f"--- Could not extract text from {filename} ---")
-
-        if not context_parts:
-            return "Could not extract text from any of the relevant PDF documents."
-
-        context = "\n".join(context_parts)
-
-        try:
-            response = self.rag_chain.run(question=query, context=context)
-            return response
-        except Exception as e:
-            print(f"Error running RAG chain: {e}")
-            return "Error generating answer from PDF context."
-
     def ask(self, query: str) -> str:
-        print(f"\nUser query: {query}")
-        try:
-            response = self.agent_executor.run(query)
-            print(f"Agent response: {response}")
-            return response
-        except Exception as e:
-            print(f"Error during agent execution: {e}")
-            Conversation.save(self.memory, self.conv_cache_path)
-            return "Sorry, an error occurred while processing your request."
+        return self.executor.run(input=query)
+
+
+    def info(self) -> None:
+        Out.yellow("LangChain Agent Information")
+        Out.white(f"Agent: {self.executor.agent}")
+        Out.white(f"Executor: {self.executor}")
+        Out.cyan("Available Tools:")
+        for tool in self.tools:
+            description = tool.description if isinstance(tool.description, str) else "No description available."
+            Out.white(f"- {tool.name}: {description.strip().splitlines()[0]}")
+        Out.cyan(f"PDFs indexed: {len(Store.db)}")
+        Out.cyan(f"Memory: '{self.memory}'")
 
     def start(self):
-        print("\n--- LangChain Agent Initialized ---")
-        print("Available Tools:")
-        for tool in self.tools:
-            print(f"- {tool.name}: {tool.description.strip().splitlines()[0]}")
-        print(f"PDFs indexed: {len(VECTOR_DATA)}")
-        print(f"Conversation cache: '{self.conv_cache_path}'")
-        print("Type 'salir', 'exit', or 'quit' to end.")
-        print("-----------------------------------")
+        Out.green("\n\n\n¡Bienvenido! Soy su asistente médico virtual. ¿En qué puedo ayudarle hoy?")
+        Out.yellow(f"Type one of {', '.join(sorted(self.EXIT_COMMANDS))} to end.")
 
         while True:
-            try:
-                user_input = input("You: ")
-                if user_input.lower() in ["salir", "exit", "quit"]:
-                    print("Exiting agent...")
-                    break
-                if not user_input:
-                    continue
-
-                assistant_response = self.ask(user_input)
-
-            except KeyboardInterrupt:
-                print("\nInterrupted by user. Exiting...")
+            user_input = Out.input(">>> ")
+            if user_input.lower() in self.EXIT_COMMANDS:
+                Out.yellow("Agent: Goodbye!")
                 break
-            except Exception as e:
-                print(f"An unexpected error occurred in the chat loop: {e}")
-                break
+            if not user_input:
+                continue
+            response = self.ask(user_input)
+            Out.green(f"Agent: {response}")
 
-        Conversation.save(self.memory, self.conv_cache_path)
-        print("Chat ended.")
+        Conversation.save(self.memory)
+        Out.green("Chat ended.")
 
 
 if __name__ == "__main__":
-    VECTOR_DATA = Store.load(VECTORSTORE_FILE)
-    QUERY_EMBEDDING_MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME, cache_folder=CACHE_DIR)
-
-    agent_instance = Agent(api_key=OPENAI_API_KEY, conv_cache_path=CONVERSATION_CACHE)
-    agent_instance.start()
+    Brain.load()
+    Store.load()
+    Vector.load()
+    agent = Agent()
+    agent.info()
+    agent.start()

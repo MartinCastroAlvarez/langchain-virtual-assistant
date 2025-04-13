@@ -23,6 +23,7 @@ PymuPDF = "^1.23.0" # For reading PDFs in agent for RAG
 sentence-transformers = "^2.2.0" # For embedding queries in agent
 tqdm = "^4.62.0"
 numpy = "^1.26.0" # For similarity calculation
+colorama = "^0.4.6"
 
 
 [build-system]

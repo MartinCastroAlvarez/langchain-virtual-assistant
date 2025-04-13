@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
+import os
 import random
 from dataclasses import dataclass
+from datetime import datetime
+from datetime import timedelta
+
 from fpdf import FPDF
-from datetime import datetime, timedelta
-import os
-import argparse
 
 PDF_DIR = "pdfs"
 os.makedirs(PDF_DIR, exist_ok=True)

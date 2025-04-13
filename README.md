@@ -33,7 +33,7 @@ poetry run python3 generator.py --number 10
 2. You can then generate a vector store in [vectorstore.json](vectorstore.json) . using the following command:
 
 ```bash
-pooetry run python3 indexer.py
+poetry run python3 indexer.py
 ```
 
 3. Finally, run the smart agent and start asking questions:
