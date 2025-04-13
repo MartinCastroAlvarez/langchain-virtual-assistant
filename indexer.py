@@ -3,6 +3,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from dataclasses import field
 
 import fitz
 import numpy as np
@@ -105,10 +106,10 @@ class Pdf:
 
 @dataclass
 class Indexer:
-    pdf_dir: str
-    db_file: str
-    model_name: str
-    cache_dir: str
+    pdf_dir: str = field(default=PDF_DIR)
+    db_file: str = field(default=DATABASE_FILE)
+    model_name: str = field(default=EMBEDDING_MODEL)
+    cache_dir: str = field(default=CACHE_DIR)
     _model: SentenceTransformer | None = None
 
     @property
@@ -145,5 +146,5 @@ class Indexer:
 
 
 if __name__ == "__main__":
-    indexer = Indexer(pdf_dir=PDF_DIR, db_file=DATABASE_FILE, model_name=EMBEDDING_MODEL, cache_dir=CACHE_DIR)
+    indexer = Indexer()
     indexer.run()

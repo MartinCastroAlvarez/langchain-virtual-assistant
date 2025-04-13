@@ -18,12 +18,9 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain.memory import ConversationSummaryBufferMemory
 from langchain.prompts import PromptTemplate
-from langchain.retrievers import BM25Retriever
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document as LC_Document
 from langchain_core.retrievers import BaseRetriever
-from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -262,6 +259,12 @@ class Agent:
             },
         )
 
+    @classmethod
+    def load(cls) -> None:
+        Brain.load()
+        Store.load()
+        Vector.load()
+
     def recommend(self, query: str) -> str:
         inputs = {
             "input": query,
@@ -350,9 +353,7 @@ class Tools:
 
 
 if __name__ == "__main__":
-    Brain.load()
-    Store.load()
-    Vector.load()
+    Agent.load()
     agent = Agent()
     agent.info()
     agent.start()

@@ -2,6 +2,8 @@
 
 LangChain Virtual Assistant
 
+![wallpaper.jpg](wallpaper.jpg)
+
 ## Setup
 
 1. Clone the repository:
@@ -40,6 +42,12 @@ poetry run python3 indexer.py
 
 ```bash
 poetry run python3 agent.py
+```
+
+4. Run the Jupyter Notebook
+
+```bash
+poetry run jupyter notebook ./asistente_medico.ipynb 
 ```
 
 ## Example

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
@@ -291,6 +292,10 @@ class Consultation:
     date: datetime
 
     @staticmethod
+    def safe_text(text: str, width: int = 100) -> str:
+        return "\n".join(textwrap.wrap(text, width))
+
+    @staticmethod
     def generate() -> Consultation:
         return Consultation(
             patient=random.choice(PATIENTS),
@@ -304,19 +309,24 @@ class Consultation:
 
     def to_pdf(self, path: str = PDF_DIR) -> str:
         pdf = FPDF()
+        pdf.set_margins(20, 20, 20)  # Left, Top, Right margins
         pdf.add_page()
         pdf.set_font("Arial", size=12)
-        pdf.cell(200, 10, txt="Informe de Consulta Médica", ln=True, align="C")
+
+        # Calculate effective width for multi_cell
+        effective_width = pdf.w - pdf.l_margin - pdf.r_margin
+
+        pdf.cell(effective_width, 10, txt="Informe de Consulta Médica", ln=True, align="C")
         pdf.ln(10)
-        pdf.cell(200, 10, txt=f"Fecha de consulta: {self.date.strftime('%d/%m/%Y')}", ln=True)
-        pdf.cell(200, 10, txt=f"Paciente: {self.patient}", ln=True)
-        pdf.cell(200, 10, txt=f"Médico: {self.doctor}", ln=True)
+        pdf.cell(effective_width, 10, txt=f"Fecha de consulta: {self.date.strftime('%d/%m/%Y')}", ln=True)
+        pdf.cell(effective_width, 10, txt=f"Paciente: {self.patient}", ln=True)
+        pdf.cell(effective_width, 10, txt=f"Médico: {self.doctor}", ln=True)
         pdf.ln(10)
-        pdf.multi_cell(0, 10, txt=f"Motivo de la consulta: {self.problem}")
-        pdf.multi_cell(0, 10, txt=f"Diagnóstico: {self.diagnosis}")
-        pdf.multi_cell(0, 10, txt=f"Recomendación: {self.recommendation}")
+        pdf.multi_cell(effective_width, 10, txt=self.safe_text(f"Motivo de la consulta: {self.problem}", width=60))
+        pdf.multi_cell(effective_width, 10, txt=self.safe_text(f"Diagnóstico: {self.diagnosis}", width=60))
+        pdf.multi_cell(effective_width, 10, txt=self.safe_text(f"Recomendación: {self.recommendation}", width=60))
         if self.medicine:
-            pdf.multi_cell(0, 10, txt=f"Medicamento prescripto: {self.medicine}")
+            pdf.multi_cell(effective_width, 10, txt=self.safe_text(f"Medicamento prescripto: {self.medicine}", width=60))
         filename = os.path.join(path, f"{self.patient.replace(' ', '_')}_{self.date.strftime('%d-%m-%Y')}.pdf")
         pdf.output(filename)
         print(f"PDF generado: {filename}")
