@@ -16,10 +16,7 @@ cd langchain-virtual-assistant
 ```bash
 poetry install
 ```
-
-3. Place your PDF files in the [./pdfs](./pdfs) directory
-
-4. Set the OpenAI API Key.
+3. Set the OpenAI API Key.
 
 ```bash
 export OPENAI_API_KEY="lorem-ipsum"
@@ -27,8 +24,14 @@ export OPENAI_API_KEY="lorem-ipsum"
 
 ## Usage
 
-1. Simply run the smart agent:
+1. Place your PDF files in the [./pdfs](./pdfs) directory. Alternatively, you can generate test PDFs using the following command:
 
 ```bash
-poetry run python agent.py
+poetry run python3 gen.py --number 10
+```
+
+2. Simply run the smart agent:
+
+```bash
+poetry run python3 agent.py
 ```
