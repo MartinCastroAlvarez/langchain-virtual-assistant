@@ -159,12 +159,22 @@ class Template:
         input_variables=["input", "context"],
         template=(
             "You are an assistant specializing in analyzing medical consultation PDFs. "
-            "Answer the following question based *only* on the provided context from relevant PDF documents. "
-            "If the context doesn't contain the answer, state that the information is not available in the provided documents. "
-            "Explicitly mention the filename(s) from the context that support your answer. The context contains markers like '--- Context from filename.pdf ---'.\n\n"
+            "For each relevant medical case found in the PDFs, provide a comprehensive analysis including:\n"
+            "1. The specific PDF documents that contain relevant information\n"
+            "2. For each case found:\n"
+            "   - The diagnosis given\n"
+            "   - The treatment or medication prescribed\n"
+            "   - The doctor's specific recommendations\n"
+            "3. A summary comparing the cases if multiple relevant documents are found\n\n"
+            "Important guidelines:\n"
+            "- Always mention which PDF documents you're referencing\n"
+            "- If multiple similar cases exist, compare their treatments and recommendations\n"
+            "- If the information requested isn't found in the documents, clearly state this\n"
+            "- Include any prescribed medications and their dosages\n"
+            "- Emphasize that these are reference cases and the patient should consult a healthcare professional\n\n"
             "Context from PDF documents:\n{context}\n\n"
             "Question from the patient: {input}\n"
-            "Your Answer:"
+            "Your Analysis:"
         ),
     )
 
@@ -175,6 +185,21 @@ class Template:
             "If there are medical terms, provide simple explanations in parentheses. Keep the tone friendly and accessible.\n\n"
             "English text: {text}\n\n"
             "Simple Spanish translation:"
+        ),
+    )
+
+    SPLIT_PROBLEMS = PromptTemplate(
+        input_variables=["symptoms"],
+        template=(
+            "Split the following patient symptoms/problems into distinct medical conditions that should be analyzed separately. "
+            "For each condition, provide:\n"
+            "1. The main symptom or condition\n"
+            "2. Related symptoms that might be connected\n"
+            "3. A search query to find relevant medical cases\n\n"
+            "Format the response as a JSON array where each object has the fields: "
+            "'condition', 'related_symptoms', and 'search_query'.\n\n"
+            "Patient symptoms: {symptoms}\n\n"
+            "Split conditions:"
         ),
     )
 
@@ -234,6 +259,7 @@ class Agent:
             Tool(name="SearchWeb", func=Tools.search, description=Tools.search.__doc__),
             Tool(name="Recommend", func=self.recommend, description="Answers medical questions using PDF documents with history-aware retrieval"),
             Tool(name="TranslateToSpanish", func=Tools.translate_to_spanish, description=Tools.translate_to_spanish.__doc__),
+            Tool(name="SplitProblems", func=Tools.split_medical_problems, description=Tools.split_medical_problems.__doc__),
         ]
 
         self.executor: AgentExecutor = initialize_agent(
@@ -248,12 +274,19 @@ class Agent:
                     "You are a bilingual (English-Spanish) medical assistant specializing in analyzing medical consultation PDFs. "
                     "Always respond in the same language as the user's question. "
                     "For English questions, answer in English. For Spanish questions, answer in Spanish. "
-                    "When a user presents any medical symptoms or health-related questions, ALWAYS use the Recommend tool first "
-                    "to search through the medical PDFs and provide evidence-based information. "
+                    "When a user presents any medical symptoms or health-related questions:\n"
+                    "1. FIRST use the SplitProblems tool to break down complex symptoms into distinct conditions\n"
+                    "2. Then use the Recommend tool for EACH condition separately to provide comprehensive analysis including:\n"
+                    "   - Similar cases found in the documents\n"
+                    "   - Treatments and medications prescribed in those cases\n"
+                    "   - Specific recommendations given by doctors\n"
+                    "   - Comparisons between different cases if available\n"
+                    "3. Finally, provide a unified analysis that considers potential interactions between conditions\n\n"
                     "When answering in Spanish, use simple and clear language that a non-medical audience can understand, "
                     "and include brief explanations in parentheses for medical terms. "
-                    "Base your answers on the provided context from relevant PDF documents and always reference which documents "
-                    "you used in your response. If the medical information needed is not found in the PDFs, clearly state this "
+                    "Always emphasize that the information provided is from reference cases and the user should consult "
+                    "a healthcare professional for personalized medical advice. "
+                    "If the medical information needed is not found in the PDFs, clearly state this "
                     "and suggest consulting a healthcare professional."
                 )
             },
@@ -321,6 +354,17 @@ class Tools:
         main_content = soup.find("body")
         text = main_content.get_text(separator=" ", strip=True) if main_content else soup.get_text(separator=" ", strip=True)
         return text[:2000] if text else "No content found."
+
+    @staticmethod
+    def split_medical_problems(symptoms: str) -> str:
+        """
+        Splits complex medical symptoms or conditions into distinct problems for separate analysis.
+        Returns a JSON array of conditions with related symptoms and search queries.
+        Input must be the patient's symptoms or medical problems.
+        """
+        assert Brain.model, "Brain not initialized. Cannot perform problem splitting."
+        chain = LLMChain(llm=Brain.model, prompt=Template.SPLIT_PROBLEMS)
+        return chain.run(symptoms=symptoms)
 
     @staticmethod
     def extract_pdf_text(filename: str) -> str:

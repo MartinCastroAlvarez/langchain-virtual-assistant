@@ -1,6 +1,6 @@
 # LangChain Virtual Assistant
 
-LangChain Virtual Assistant
+LangChain Virtual Assistant using LangChain and [JupyterNotebook](asistente_medico).
 
 ![wallpaper.jpg](wallpaper.jpg)
 
@@ -44,7 +44,7 @@ poetry run python3 indexer.py
 poetry run python3 agent.py
 ```
 
-4. Run the Jupyter Notebook
+4. You can also run the Jupyter Notebook, but you will need to create an `.env` with an `OPENAI_API_KEY`.
 
 ```bash
 poetry run jupyter notebook ./asistente_medico.ipynb 
