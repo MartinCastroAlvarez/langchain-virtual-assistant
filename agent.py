@@ -24,6 +24,9 @@ from langchain_core.retrievers import BaseRetriever
 from langchain_openai import ChatOpenAI
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from dotenv import load_dotenv
+
+load_dotenv()
 
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY")
 assert OPENAI_API_KEY, "OPENAI_API_KEY not found in environment variables."

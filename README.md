@@ -44,14 +44,6 @@ poetry run python3 indexer.py
 poetry run python3 agent.py
 ```
 
-4. You can also run the Jupyter Notebook, but you will need to create an `.env` with an `OPENAI_API_KEY`.
-
-```bash
-poetry run jupyter notebook ./asistente_medico.ipynb 
-```
-
-## Example
-
 ```bash
 ¡Bienvenido! Soy su asistente médico virtual. ¿En qué puedo ayudarle hoy?
 Type one of adiós, bye, chau, exit, goodbye, quit, salir to end.
@@ -71,3 +63,11 @@ Agent: El paciente con dolor de hombro tiene un diagnóstico de Síndrome del in
 >>> tengo ansiedad y depresión
 Agent: El paciente con ansiedad y depresión puede encontrar información relevante en los archivos 'Sophia_Ortega_18-03-2025.pdf', 'Valentina_Ríos_14-09-2024.pdf', 'William_Ríos_20-01-2025.pdf', entre otros.
 ```
+
+4. You can also run the Jupyter Notebook, but you will need to create an `.env` with an `OPENAI_API_KEY`.
+
+```bash
+poetry run jupyter notebook ./asistente_medico.ipynb 
+```
+
+![jupyter.png](jupyter.png)
