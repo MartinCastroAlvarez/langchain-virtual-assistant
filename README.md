@@ -4,6 +4,14 @@ LangChain Virtual Assistant using LangChain and [JupyterNotebook](asistente_medi
 
 ![wallpaper.jpg](wallpaper.jpg)
 
+## Overview
+
+![graph.png](graph.png)
+
+## Paper
+
+Read [LangChain.pdf](./LangChain.pdf)
+
 ## Setup
 
 1. Clone the repository:
